@@ -423,6 +423,12 @@ Examples:
         action="store_false",
         help="不导出 sweep mask"
     )
+    parser.add_argument(
+        "--roi-config",
+        type=str,
+        default=None,
+        help="ROI 配置文件路径 (用于 mask 四边形过滤，默认使用项目根目录的 config.yaml)"
+    )
 
     args = parser.parse_args()
 
@@ -491,6 +497,7 @@ Examples:
             config=config,
             task_prefix=args.task_prefix,
             export_mask=args.export_mask,
+            roi_config_path=args.roi_config,
         )
 
         print(f"\nExport complete:")

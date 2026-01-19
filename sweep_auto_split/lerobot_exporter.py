@@ -30,7 +30,14 @@ except ImportError:
     CV2_AVAILABLE = False
 
 from .config import SegmentBoundary, SweepSegmentConfig
-from .mask_generator import SweepMaskGenerator, create_mask_generator, MaskConfig
+from .mask_generator import (
+    SweepMaskGenerator,
+    create_mask_generator,
+    MaskConfig,
+    ROIConfig,
+    load_roi_config,
+    get_roi_config,
+)
 
 
 def check_ffmpeg_available() -> bool:
@@ -62,6 +69,8 @@ class ExportConfig:
     verbose: bool = True
     # Mask export options
     export_mask: bool = True  # 是否导出 sweep mask
+    # ROI config path (for mask filtering)
+    roi_config_path: Optional[str] = None
 
 
 @dataclass
@@ -94,9 +103,12 @@ class LeRobotSegmentExporter:
         self.source_metadata = source_metadata
         self.output_path = config.output_path
 
+        # 加载 ROI 配置
+        self.roi_config = load_roi_config(config.roi_config_path)
+
         # 初始化 mask 生成器
         if config.export_mask:
-            self.mask_generator = create_mask_generator()
+            self.mask_generator = create_mask_generator(roi_config=self.roi_config)
         else:
             self.mask_generator = None
 
@@ -553,9 +565,17 @@ class LeRobotSegmentExporter:
         if mask.shape[0] != height or mask.shape[1] != width:
             mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
 
-        # 创建彩色 mask（紫色高亮）
+        # 获取 mask 颜色和透明度（从 ROI 配置）
+        if self.roi_config is not None:
+            mask_color_bgr = list(self.roi_config.mask_color)
+            alpha = self.roi_config.mask_alpha
+        else:
+            mask_color_bgr = [255, 0, 255]  # 默认紫色 (BGR)
+            alpha = 0.4  # 默认透明度
+
+        # 创建彩色 mask
         mask_color = np.zeros((height, width, 3), dtype=np.uint8)
-        mask_color[mask > 0] = [255, 0, 255]  # 紫色 (BGR)
+        mask_color[mask > 0] = mask_color_bgr
 
         # 创建输出视频
         for codec in ['avc1', 'mp4v', 'XVID']:
@@ -570,9 +590,6 @@ class LeRobotSegmentExporter:
 
         # 定位到起始帧
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-        # 叠加参数
-        alpha = 0.4  # mask 透明度
 
         # 处理每一帧
         for _ in range(num_frames):
@@ -977,6 +994,7 @@ def export_segmented_dataset(
     config: Optional[SweepSegmentConfig] = None,
     task_prefix: str = "sweep",
     export_mask: bool = True,
+    roi_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     便捷函数：导出切分后的数据集
@@ -988,6 +1006,7 @@ def export_segmented_dataset(
         config: 切分配置（可选）
         task_prefix: 任务前缀
         export_mask: 是否导出 sweep mask
+        roi_config_path: ROI 配置文件路径（用于 mask 过滤）
 
     Returns:
         导出统计信息
@@ -1003,6 +1022,7 @@ def export_segmented_dataset(
         fps=data_loader.fps,
         verbose=config.verbose if config else True,
         export_mask=export_mask,
+        roi_config_path=roi_config_path,
     )
 
     # 创建导出器
