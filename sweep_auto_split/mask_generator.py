@@ -1068,10 +1068,10 @@ def render_mask_overlay_video(
             cv2.polylines(blended, [roi_pts], isClosed=True, color=(0, 255, 0), thickness=2)
 
         # 添加标签
-        cv2.putText(blended, "Sweep Mask (ROI filtered)", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(blended, f"Frame: {frame_count}/{total_frames}", (10, 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # cv2.putText(blended, "Sweep Mask (ROI filtered)", (10, 30),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # cv2.putText(blended, f"Frame: {frame_count}/{total_frames}", (10, 60),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         out.write(blended)
         frame_count += 1

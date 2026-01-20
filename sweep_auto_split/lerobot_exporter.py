@@ -607,8 +607,8 @@ class LeRobotSegmentExporter:
             blended = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
 
             # 添加标签
-            cv2.putText(blended, "Sweep Mask", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            # cv2.putText(blended, "Sweep Mask", (10, 30),
+            #            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
             out.write(blended)
 
