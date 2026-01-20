@@ -26,7 +26,6 @@ import numpy as np
 from .config import SweepSegmentConfig, SweepKeypoint, SegmentBoundary
 from .data_loader import LeRobotDataLoader, EpisodeData
 from .sweep_detector import SweepDetector
-from .action_detector import ActionBasedSweepDetector, analyze_action_data
 from .segment_calculator import SegmentCalculator, print_segment_summary
 from .signal_processing import (
     compute_adaptive_thresholds,
@@ -41,68 +40,6 @@ from .kinematics import (
 from .visual_checker import VisualQualityChecker, create_default_roi_for_sweep
 from .lerobot_exporter import export_segmented_dataset, ExportConfig, LeRobotSegmentExporter
 from .diagnostics import DiagnosticsCollector, generate_paper_statistics
-
-
-def process_episode_action_based(
-    episode_data: EpisodeData,
-    config: SweepSegmentConfig,
-    action_detector: ActionBasedSweepDetector,
-    calculator: SegmentCalculator,
-    visual_checker: Optional[VisualQualityChecker] = None,
-) -> tuple:
-    """
-    使用 action-based 检测处理单个 episode
-
-    Args:
-        episode_data: episode 数据
-        config: 配置
-        action_detector: action-based sweep 检测器
-        calculator: 边界计算器
-        visual_checker: 视觉质检器（可选）
-
-    Returns:
-        (keypoints, boundaries, visual_results, diagnostics)
-    """
-    action_trajectory = episode_data.action_trajectory
-    state_trajectory = episode_data.state_trajectory
-
-    # Step 1: 使用 action-based 检测
-    keypoints, diagnostics = action_detector.detect_keypoints(
-        action_trajectory, state_trajectory
-    )
-
-    # Step 2: 计算 segment 边界
-    episode_length = len(action_trajectory)
-    boundaries = calculator.calculate_boundaries(keypoints, episode_length)
-
-    # Step 3: 视觉质检（可选）
-    visual_results = None
-    if visual_checker and episode_data.video_paths:
-        # 尝试使用 main 相机，如果没有则尝试其他相机
-        video_path = None
-        for cam_name in ["main", "cam_main", "observation.images.main"]:
-            video_path = episode_data.video_paths.get(cam_name)
-            if video_path:
-                break
-
-        # 如果都没有，使用第一个可用的相机
-        if not video_path and episode_data.video_paths:
-            video_path = list(episode_data.video_paths.values())[0]
-
-        if video_path:
-            visual_results = visual_checker.validate_all_sweeps(
-                video_path, keypoints, episode_length
-            )
-
-            # 根据视觉质检结果更新 keypoints 的有效性
-            for kp, vr in zip(keypoints, visual_results):
-                if not vr.is_valid:
-                    kp.is_valid = False
-
-            # 重新计算边界
-            boundaries = calculator.calculate_boundaries(keypoints, episode_length)
-
-    return keypoints, boundaries, visual_results, diagnostics
 
 
 def process_episode_fk(
@@ -172,17 +109,15 @@ def process_dataset(
     config: SweepSegmentConfig,
     max_episodes: Optional[int] = None,
     enable_visual_check: bool = False,
-    detection_method: str = "fk",  # "fk" (recommended) or "action"
 ) -> tuple:
     """
-    处理整个数据集
+    处理整个数据集（使用 FK-based 检测）
 
     Args:
         dataset_path: 数据集路径
         config: 配置
         max_episodes: 最大处理 episode 数
         enable_visual_check: 是否启用视觉质检
-        detection_method: 检测方法，"fk" (基于低位阈值+v_xy) 或 "action" (基于能量)
 
     Returns:
         (results, data_loader, diagnostics_collector)
@@ -197,19 +132,14 @@ def process_dataset(
         print(f"  Total episodes: {data_loader.total_episodes}")
         print(f"  Total frames: {data_loader.total_frames}")
         print(f"  FPS: {data_loader.fps}")
-        print(f"  Detection method: {detection_method}")
+        print(f"  Detection method: FK-based")
 
     # 初始化组件
     calculator = SegmentCalculator(config)
     diagnostics = DiagnosticsCollector(config, dataset_path)
 
-    # 根据检测方法初始化检测器
-    if detection_method == "action":
-        action_detector = ActionBasedSweepDetector(config)
-        fk_detector = None
-    else:  # fk (default, recommended)
-        fk_detector = SweepDetector(config)
-        action_detector = None
+    # 使用 FK-based 检测器
+    fk_detector = SweepDetector(config)
 
     # 初始化视觉质检器
     visual_checker = None
@@ -236,36 +166,22 @@ def process_dataset(
         # 加载 episode 数据
         episode_data = data_loader.load_episode(ep_id)
 
-        # 处理 episode
-        if detection_method == "action":
-            keypoints, boundaries, visual_results, action_diagnostics = process_episode_action_based(
-                episode_data=episode_data,
-                config=config,
-                action_detector=action_detector,
-                calculator=calculator,
-                visual_checker=visual_checker,
-            )
-            thresholds = None
-            if action_diagnostics and "thresholds" in action_diagnostics:
-                thresholds = {
-                    "energy_threshold": action_diagnostics["thresholds"].energy_threshold,
-                }
-        else:  # fk
-            keypoints, boundaries, visual_results, diagnostic_data = process_episode_fk(
-                episode_data=episode_data,
-                config=config,
-                detector=fk_detector,
-                calculator=calculator,
-                visual_checker=visual_checker,
-            )
-            thresholds = None
-            if diagnostic_data and "config" in diagnostic_data:
-                thresholds = {
-                    "v_xy_threshold": diagnostic_data["config"]["v_xy_threshold"],
-                    "tool_tip_offset": diagnostic_data["config"]["tool_tip_offset"],
-                    "table_z": diagnostic_data["config"]["table_z"],
-                    "fps": diagnostic_data["config"]["fps"],
-                }
+        # 使用 FK-based 检测
+        keypoints, boundaries, visual_results, diagnostic_data = process_episode_fk(
+            episode_data=episode_data,
+            config=config,
+            detector=fk_detector,
+            calculator=calculator,
+            visual_checker=visual_checker,
+        )
+        thresholds = None
+        if diagnostic_data and "config" in diagnostic_data:
+            thresholds = {
+                "v_xy_threshold": diagnostic_data["config"]["v_xy_threshold"],
+                "tool_tip_offset": diagnostic_data["config"]["tool_tip_offset"],
+                "table_z": diagnostic_data["config"]["table_z"],
+                "fps": diagnostic_data["config"]["fps"],
+            }
 
         results[ep_id] = (keypoints, boundaries)
 
@@ -287,18 +203,15 @@ def process_dataset(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Sweep Auto Split - 基于 Pi/LeRobot 的 Sweep 动作自动切分工具",
+        description="Sweep Auto Split - 基于 Pi/LeRobot 的 Sweep 动作自动切分工具（FK-based 检测）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # 分析数据集 (默认使用 action-based 检测)
+  # 分析数据集
   python -m sweep_auto_split.main --input /path/to/dataset --analyze
 
-  # 使用 FK-based 检测
-  python -m sweep_auto_split.main --input /path/to/dataset --detection-method fk --analyze
-
-  # 使用自适应阈值 (仅 FK-based 检测支持)
-  python -m sweep_auto_split.main --input /path/to/dataset --detection-method fk --adaptive-thresholds
+  # 使用自适应阈值
+  python -m sweep_auto_split.main --input /path/to/dataset --adaptive-thresholds
 
   # 完整处理并导出
   python -m sweep_auto_split.main --input /path/to/dataset --output /path/to/output
@@ -344,7 +257,7 @@ Examples:
     parser.add_argument("--A-min", type=int, default=2, help="Approach 最少帧数 (default: 2)")
     parser.add_argument("--R-min", type=int, default=2, help="Retreat 最少帧数 (default: 2)")
 
-    # 检测参数
+    # FK-based 检测参数
     parser.add_argument("--z-on", type=float, default=0.05, help="低位区进入阈值")
     parser.add_argument("--z-off", type=float, default=0.06, help="低位区退出阈值")
     parser.add_argument("--v-xy-threshold", type=float, default=0.02, help="水平速度阈值")
@@ -353,20 +266,6 @@ Examples:
     # 质量过滤
     parser.add_argument("--L23-min", type=int, default=15, help="Engage+Stroke 最小长度")
     parser.add_argument("--L23-max", type=int, default=28, help="Engage+Stroke 最大长度")
-
-    # Action-based 检测参数（用于调节准确性）
-    parser.add_argument(
-        "--energy-percentile",
-        type=int,
-        default=60,
-        help="能量阈值百分位数 (default: 60)。较低的值会捕获更多运动，防止sweep过早截断"
-    )
-    parser.add_argument(
-        "--merge-gap",
-        type=int,
-        default=2,
-        help="合并间隔帧数 (default: 2)。较小的值可以防止两个独立的sweep被合并成一个"
-    )
 
     # 其他参数
     parser.add_argument(
@@ -383,12 +282,6 @@ Examples:
         help="最大处理 episode 数（用于测试）"
     )
     parser.add_argument(
-        "--task-prefix",
-        type=str,
-        default="sweep",
-        help="任务前缀 (default: sweep)"
-    )
-    parser.add_argument(
         "--diagnostics-output",
         type=str,
         default=None,
@@ -403,13 +296,6 @@ Examples:
         "--visualize",
         action="store_true",
         help="生成可视化"
-    )
-    parser.add_argument(
-        "--detection-method",
-        type=str,
-        default="action",
-        choices=["action", "fk"],
-        help="检测方法: action (基于action能量) 或 fk (基于正运动学) (default: action)"
     )
     parser.add_argument(
         "--export-mask",
@@ -452,9 +338,6 @@ Examples:
         active_arm=args.arm,
         verbose=args.verbose,
         visualize=args.visualize,
-        # Action-based 检测参数
-        energy_percentile=args.energy_percentile,
-        merge_gap=args.merge_gap,
     )
 
     # 处理数据集
@@ -463,7 +346,6 @@ Examples:
         config=config,
         max_episodes=args.max_episodes,
         enable_visual_check=args.visual_check,
-        detection_method=args.detection_method,
     )
 
     # 打印摘要
@@ -501,7 +383,6 @@ Examples:
             output_path=args.output,
             all_boundaries=all_boundaries,
             config=config,
-            task_prefix=args.task_prefix,
             export_mask=args.export_mask,
             roi_config_path=args.roi_config,
             export_workers=args.export_workers,

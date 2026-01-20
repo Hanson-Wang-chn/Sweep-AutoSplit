@@ -24,8 +24,7 @@ Sweep-AutoSplit/
     ├── main.py                  # 主程序入口
     ├── data_loader.py           # LeRobot 数据加载器
     ├── kinematics.py            # 前向运动学计算
-    ├── sweep_detector.py        # Sweep 端点检测 (核心算法)
-    ├── action_detector.py       # 基于 Action 的检测方法
+    ├── sweep_detector.py        # Sweep 端点检测 (核心算法, FK-based)
     ├── segment_calculator.py    # Segment 边界计算
     ├── signal_processing.py     # 信号处理工具
     ├── visual_checker.py        # 视觉质检模块
@@ -49,7 +48,6 @@ pip install -e .
 ```bash
 python -m sweep_auto_split.main \
     --input /path/to/lerobot_dataset \
-    --detection-method fk \
     --arm left \
     --analyze \
     --verbose
@@ -59,29 +57,19 @@ python -m sweep_auto_split.main \
 
 ```bash
 python -m sweep_auto_split.main \
-    --input /home/zeno-yifan/NPM-Project/lerobot21_dataset \
-    --output /home/zeno-yifan/NPM-Project/datasets/sweep_to_E_and_recover_lerobot21_segmented_p1 \
-    --detection-method fk \
+    --input /home/zeno-yifan/NPM-Project/datasets/sweep_to_C \
+    --output /home/zeno-yifan/NPM-Project/datasets/sweep_to_C_autosplit_v2 \
     --arm both
 ```
 
 ### 3. 生成可视化
 
 ```bash
-# 静态图片
 python -m sweep_auto_split.visualize_sweep \
-    --input /path/to/lerobot_dataset \
+    --input /home/zeno-yifan/NPM-Project/datasets/sweep_to_C  \
     --output ./sweep_viz \
     --max-episodes 5 \
     --arm left
-
-# 动态视频
-python -m sweep_auto_split.visualize_sweep \
-    --input /path/to/lerobot_dataset \
-    --output ./sweep_viz_video \
-    --arm left \
-    --video \
-    --video-fps 15
 ```
 
 ## 检测算法说明
@@ -138,22 +126,20 @@ d(t) [cm]
 | `--input`, `-i` | str | **必需** | 输入 LeRobot 数据集路径 |
 | `--output`, `-o` | str | None | 输出数据集路径 |
 | `--analyze` | flag | False | 只分析不导出 |
-| `--detection-method` | str | "action" | 检测方法: `fk` 或 `action` |
 | `--arm` | str | "left" | 使用哪只手臂: `left`, `right` 或 `both` |
 | `--visual-check` | flag | False | 启用视觉质检 |
 | `--verbose`, `-v` | flag | False | 详细输出 |
 
 > **注意**: `--arm both` 模式会分别检测左右臂的 sweep，然后按时间顺序合并。适用于左右手交替扫动的任务。
 
-### 检测参数
+### FK-based 检测参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--z-on` | float | 0.05 | 低位区进入阈值 (米) |
 | `--z-off` | float | 0.06 | 低位区退出阈值 (米) |
+| `--v-xy-threshold` | float | 0.02 | 水平速度阈值 (米/帧) |
 | `--smoothing-window` | int | 7 | 平滑窗口大小 |
-| `--energy-percentile` | int | 60 | v_xy 阈值百分位数 |
-| `--merge-gap` | int | 2 | 合并间隔帧数 |
 
 ### 导出参数
 
@@ -167,6 +153,8 @@ d(t) [cm]
 | `--no-export-mask` | flag | - | 不导出 mask |
 
 > **并行导出**: 仅视频导出阶段支持多进程并行，导出前的准备步骤与统计信息计算仍保持串行。
+
+> **AV1 视频自动转换**: 当检测到源视频使用 AV1 等 OpenCV 无法解码的格式时，会自动转换为 H.264 格式后再处理。转换后的视频会被缓存到临时目录，不会重复转换。这是透明进行的，无需额外参数。
 
 ### visualize_sweep.py 参数
 
@@ -191,8 +179,8 @@ from sweep_auto_split.config import SweepSegmentConfig
 config = SweepSegmentConfig(
     z_on=0.05,           # 低位区进入阈值 (米)
     z_off=0.10,          # 低位区退出阈值 (米)
+    v_xy_threshold=0.02, # 水平速度阈值 (米/帧)
     smoothing_window=7,  # 平滑窗口
-    energy_percentile=60,# v_xy 阈值百分位数
     H=30,                # Action horizon
     active_arm="both",   # 使用哪只手臂: "left", "right", "both"
     verbose=True,        # 详细输出

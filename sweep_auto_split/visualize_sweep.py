@@ -1,59 +1,63 @@
-#!/usr/bin/env python3
 """
-Sweep 检测可视化脚本
+Sweep 检测可视化模块
 
-生成刷尖高度、速度和检测区间的可视化图表
-支持静态图片和动态视频两种输出格式
+功能：
+1. 可视化单个 episode 的刷子 tip 到桌面的距离曲线
+2. 根据低位阈值（5cm）检测 sweep 区间
+3. 在图像中标记 sweep（engage+stroke）区间
+4. 支持生成静态图和动画视频
 """
 
+import os
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.animation import FuncAnimation, FFMpegWriter
+from typing import List, Optional, Tuple, Dict, Any
 from pathlib import Path
-from typing import List, Optional, Tuple
 
-from .config import SweepSegmentConfig
-from .data_loader import LeRobotDataLoader
-from .sweep_detector import SweepDetector
+from .config import SweepSegmentConfig, SweepKeypoint
 from .kinematics import (
-    create_default_kinematics_config,
-    compute_full_kinematics_from_ee_pose,
     DualArmKinematics,
+    KinematicsConfig,
+    create_default_kinematics_config,
 )
 from .signal_processing import smooth_signal
-
-# 尝试导入视频生成所需的库
-try:
-    import matplotlib.animation as animation
-    ANIMATION_AVAILABLE = True
-except ImportError:
-    ANIMATION_AVAILABLE = False
+from .sweep_detector import detect_low_distance_regions, SweepDetector
+from .data_loader import LeRobotDataLoader, EpisodeData
 
 
-def plot_sweep_detection_for_episode(
-    episode_data,
+# ============================================================
+# 核心可视化函数
+# ============================================================
+
+def plot_sweep_detection(
+    episode_data: EpisodeData,
     config: SweepSegmentConfig,
     output_path: Optional[str] = None,
-    fps: float = 10.0,
-    show_seconds: bool = True,
-    figsize: Tuple[int, int] = (16, 10)
-):
+    figsize: Tuple[int, int] = (14, 6),
+    show_dual_axis: bool = True,
+    sweep_threshold: float = 0.05,  # 5cm
+) -> Tuple[plt.Figure, Dict[str, Any]]:
     """
-    为单个 episode 绘制 sweep 检测可视化图
+    绘制 sweep 检测可视化图
+
+    根据低位阈值检测 sweep 区间，绘制刷子 tip 到桌面的距离曲线
 
     Args:
-        episode_data: EpisodeData 对象
-        config: 配置
-        output_path: 输出路径（如果为 None 则显示）
-        fps: 帧率
-        show_seconds: 横轴是否显示秒数（否则显示帧数）
-        figsize: 图像尺寸
+        episode_data: Episode 数据
+        config: 切分配置
+        output_path: 输出图片路径（可选）
+        figsize: 图片尺寸
+        show_dual_axis: 是否显示双坐标轴（帧数 + 秒数）
+        sweep_threshold: sweep 判定阈值（米），默认 0.05m = 5cm
+
+    Returns:
+        (fig, diagnostic_data): matplotlib 图对象和诊断数据
     """
-    # 创建运动学配置
-    kin_config = create_default_kinematics_config(
-        tip_offset_z=0.30,
-        table_z=-0.05,
-        fps=fps
-    )
+    # 初始化运动学
+    kin_config = create_default_kinematics_config(fps=episode_data.fps)
+    kinematics = DualArmKinematics(kin_config)
 
     # 计算运动学
     state_trajectory = episode_data.state_trajectory
@@ -87,17 +91,14 @@ def plot_sweep_detection_for_episode(
     d_smooth_right = smooth_signal(tip_to_table_right, config.smoothing_window)
     d_smooth_left = smooth_signal(tip_to_table_left, config.smoothing_window)
 
-    # 检测 sweep
-    detector = SweepDetector(config, kinematics_config=kin_config)
-    keypoints = detector.detect_keypoints(state_trajectory, ee_pose_trajectory)
-
-    # 时间轴
-    if show_seconds:
-        time_axis = np.arange(N) / fps
-        xlabel = "Time (seconds)"
-    else:
-        time_axis = np.arange(N)
-        xlabel = "Frame"
+    # 检测低位区间（sweep 区间）
+    # 使用单一阈值检测（进入和退出使用同一阈值）
+    sweep_regions = detect_low_distance_regions(
+        d_smooth,
+        threshold_on=sweep_threshold,
+        threshold_off=sweep_threshold + 0.02,  # 滞回 2cm
+        min_duration=config.low_region_min_frames
+    )
 
     # 创建图表 - 2个子图（上：右臂，下：左臂）
     fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
@@ -111,11 +112,10 @@ def plot_sweep_detection_for_episode(
     ax1.plot(time_axis, d_smooth_right * 100, 'b-', linewidth=2, label='Smoothed d(t)')
     ax1.axhline(y=0, color='brown', linestyle='--', linewidth=2, label='Table surface')
 
-    # 绘制低位阈值线
-    ax1.axhline(y=config.z_on * 100, color='orange', linestyle=':', linewidth=1.5,
-                label=f'z_on threshold ({config.z_on*100:.1f}cm)')
-    ax1.axhline(y=config.z_off * 100, color='red', linestyle=':', linewidth=1.5,
-                label=f'z_off threshold ({config.z_off*100:.1f}cm)')
+    # 绘制距离曲线
+    ax1.plot(frames, d_smooth * 100, 'b-', linewidth=1.5, label='Tip-to-Table Distance')
+    ax1.axhline(y=sweep_threshold * 100, color='r', linestyle='--', linewidth=1.5,
+                label=f'Sweep Threshold ({sweep_threshold*100:.0f}cm)')
 
     # 标记 sweep 区间
     for i, kp in enumerate(keypoints):
@@ -131,7 +131,6 @@ def plot_sweep_detection_for_episode(
     ax1.set_title(f'Episode {episode_data.episode_id}: Sweep Detection - Right Arm')
     ax1.legend(loc='upper right', fontsize=8)
     ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(bottom=-2)
 
     # === 子图2：左臂刷尖到桌面距离 ===
     ax2 = axes[1]
@@ -163,47 +162,46 @@ def plot_sweep_detection_for_episode(
 
     plt.tight_layout()
 
-    # 保存或显示
+    # 保存
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"Saved: {output_path}")
-        plt.close()
-    else:
-        plt.show()
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150, bbox_inches='tight')
+        if config.verbose:
+            print(f"[visualize_sweep] Saved detailed plot to: {output_path}")
 
-    return keypoints
+    return fig, diag
 
 
 def generate_sweep_detection_video(
-    episode_data,
+    episode_data: EpisodeData,
     config: SweepSegmentConfig,
     output_path: str,
-    fps: float = 10.0,
-    video_fps: int = 10,
-    figsize: Tuple[int, int] = (16, 10)
-):
+    figsize: Tuple[int, int] = (12, 6),
+    sweep_threshold: float = 0.05,
+) -> bool:
     """
-    为单个 episode 生成动态 sweep 检测视频
+    生成 sweep 检测动画视频
 
-    折线图随时间动态绘制，展示检测过程
+    显示当前帧位置随时间移动的动画
 
     Args:
-        episode_data: EpisodeData 对象
-        config: 配置
-        output_path: 输出视频路径 (.mp4)
-        fps: 数据帧率
-        video_fps: 视频帧率
-        figsize: 图像尺寸
-    """
-    if not ANIMATION_AVAILABLE:
-        print("Warning: matplotlib.animation not available, cannot generate video")
-        return None
+        episode_data: Episode 数据
+        config: 切分配置
+        output_path: 输出视频路径
+        figsize: 图片尺寸
+        sweep_threshold: sweep 判定阈值（米）
 
-    # 创建运动学配置
-    kin_config = create_default_kinematics_config(
-        tip_offset_z=0.30,
-        table_z=-0.05,
-        fps=fps
+    Returns:
+        是否成功
+    """
+    # 初始化运动学
+    kin_config = create_default_kinematics_config(fps=episode_data.fps)
+    kinematics = DualArmKinematics(kin_config)
+
+    arm = config.active_arm if config.active_arm != "both" else "left"
+    kin_result = kinematics.compute_full_kinematics(
+        episode_data.state_trajectory,
+        arm=arm
     )
 
     # 计算运动学
@@ -348,187 +346,201 @@ def generate_sweep_detection_video(
         return line1_raw, line1_smooth, line2_raw, line2_smooth, dot1, dot2, vline1, vline2
 
     # 创建动画
-    anim = animation.FuncAnimation(
-        fig, animate, init_func=init,
-        frames=N, interval=1000/video_fps, blit=False
-    )
+    anim = FuncAnimation(fig, update, frames=range(num_frames),
+                        init_func=init, blit=True, interval=100)
 
     # 保存视频
-    print(f"Generating video: {output_path} ({N} frames)")
     try:
-        writer = animation.FFMpegWriter(fps=video_fps, bitrate=2000)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        writer = FFMpegWriter(fps=episode_data.fps, bitrate=2000)
         anim.save(output_path, writer=writer)
-        print(f"Saved: {output_path}")
+        plt.close(fig)
+        if config.verbose:
+            print(f"[visualize_sweep] Saved video to: {output_path}")
+        return True
     except Exception as e:
-        print(f"FFMpeg not available, trying pillow: {e}")
-        try:
-            # 如果没有 ffmpeg，尝试保存为 gif
-            gif_path = output_path.replace('.mp4', '.gif')
-            anim.save(gif_path, writer='pillow', fps=video_fps)
-            print(f"Saved as GIF: {gif_path}")
-        except Exception as e2:
-            print(f"Failed to save video: {e2}")
-
-    plt.close()
-    return keypoints
+        plt.close(fig)
+        if config.verbose:
+            print(f"[visualize_sweep] Failed to save video: {e}")
+        return False
 
 
-def visualize_dataset(
+# ============================================================
+# 批量处理函数
+# ============================================================
+
+def visualize_dataset_sweeps(
     dataset_path: str,
     output_dir: str,
-    max_episodes: int = 5,
-    config: Optional[SweepSegmentConfig] = None
-):
-    """
-    可视化数据集中的多个 episode
-
-    Args:
-        dataset_path: 数据集路径
-        output_dir: 输出目录
-        max_episodes: 最大处理 episode 数
-        config: 配置
-    """
-    if config is None:
-        config = SweepSegmentConfig(
-            verbose=False,
-            energy_percentile=50,
-            merge_gap=3,
-            active_arm="left"  # 必须指定手臂
-        )
-
-    # 创建输出目录
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 加载数据集
-    print(f"Loading dataset: {dataset_path}")
-    data_loader = LeRobotDataLoader(dataset_path)
-    print(f"  Total episodes: {data_loader.total_episodes}")
-    print(f"  FPS: {data_loader.fps}")
-
-    # 处理每个 episode
-    episode_ids = data_loader.get_episode_list()[:max_episodes]
-
-    for i, ep_id in enumerate(episode_ids):
-        print(f"\nProcessing Episode {i+1}/{len(episode_ids)} (ID: {ep_id})")
-
-        episode_data = data_loader.load_episode(ep_id)
-        output_path = output_dir / f"sweep_detection_ep{ep_id:04d}.png"
-
-        keypoints = plot_sweep_detection_for_episode(
-            episode_data=episode_data,
-            config=config,
-            output_path=str(output_path),
-            fps=data_loader.fps,
-            show_seconds=True
-        )
-
-        print(f"  Detected {len(keypoints)} sweeps, "
-              f"{sum(1 for kp in keypoints if kp.is_valid)} valid")
-
-    print(f"\n✓ Saved {len(episode_ids)} visualizations to {output_dir}")
-
-
-def visualize_dataset_video(
-    dataset_path: str,
-    output_dir: str,
-    max_episodes: int = 5,
     config: Optional[SweepSegmentConfig] = None,
-    video_fps: int = 10
+    episode_ids: Optional[List[int]] = None,
+    max_episodes: int = 10,
+    sweep_threshold: float = 0.05,
+    generate_videos: bool = False,
 ):
     """
-    为数据集生成动态检测视频
+    批量可视化数据集中的 sweep 检测结果
 
     Args:
-        dataset_path: 数据集路径
+        dataset_path: LeRobot 数据集路径
         output_dir: 输出目录
-        max_episodes: 最大处理 episode 数
-        config: 配置
-        video_fps: 视频帧率
+        config: 切分配置
+        episode_ids: 指定要可视化的 episode ID 列表（可选）
+        max_episodes: 最大可视化 episode 数量
+        sweep_threshold: sweep 判定阈值（米）
+        generate_videos: 是否生成动画视频
     """
     if config is None:
-        config = SweepSegmentConfig(
-            verbose=False,
-            energy_percentile=50,
-            merge_gap=3,
-            active_arm="left"
-        )
-
-    # 创建输出目录
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+        config = SweepSegmentConfig()
 
     # 加载数据集
-    print(f"Loading dataset: {dataset_path}")
     data_loader = LeRobotDataLoader(dataset_path)
-    print(f"  Total episodes: {data_loader.total_episodes}")
-    print(f"  FPS: {data_loader.fps}")
+
+    if config.verbose:
+        print(f"[visualize_sweep] Dataset: {dataset_path}")
+        print(f"[visualize_sweep] Total episodes: {data_loader.total_episodes}")
+
+    # 确定要可视化的 episode
+    if episode_ids is None:
+        episode_ids = data_loader.get_episode_list()[:max_episodes]
+    else:
+        episode_ids = episode_ids[:max_episodes]
+
+    # 创建输出目录
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # 统计信息
+    stats = {
+        "total_episodes": len(episode_ids),
+        "total_sweeps": 0,
+        "episodes_with_sweeps": 0,
+    }
 
     # 处理每个 episode
-    episode_ids = data_loader.get_episode_list()[:max_episodes]
-
-    for i, ep_id in enumerate(episode_ids):
-        print(f"\nProcessing Episode {i+1}/{len(episode_ids)} (ID: {ep_id})")
+    for ep_id in episode_ids:
+        if config.verbose:
+            print(f"\n[visualize_sweep] Processing episode {ep_id}...")
 
         episode_data = data_loader.load_episode(ep_id)
-        output_path = output_dir / f"sweep_detection_ep{ep_id:04d}.mp4"
 
-        keypoints = generate_sweep_detection_video(
-            episode_data=episode_data,
-            config=config,
-            output_path=str(output_path),
-            fps=data_loader.fps,
-            video_fps=video_fps
+        # 生成静态图
+        fig, diag = plot_sweep_detection_detailed(
+            episode_data,
+            config,
+            output_path=str(output_path / f"episode_{ep_id:06d}_sweep.png"),
+            sweep_threshold=sweep_threshold,
         )
+        plt.close(fig)
 
-        if keypoints:
-            print(f"  Detected {len(keypoints)} sweeps, "
-                  f"{sum(1 for kp in keypoints if kp.is_valid)} valid")
+        # 统计
+        num_sweeps = len(diag.get("low_regions", []))
+        stats["total_sweeps"] += num_sweeps
+        if num_sweeps > 0:
+            stats["episodes_with_sweeps"] += 1
 
-    print(f"\n✓ Saved {len(episode_ids)} videos to {output_dir}")
+        if config.verbose:
+            print(f"  - Found {num_sweeps} sweeps")
+
+        # 生成视频（可选）
+        if generate_videos:
+            video_path = str(output_path / f"episode_{ep_id:06d}_sweep.mp4")
+            generate_sweep_detection_video(
+                episode_data, config, video_path,
+                sweep_threshold=sweep_threshold
+            )
+
+    # 打印统计
+    if config.verbose:
+        print(f"\n{'='*50}")
+        print(f"SWEEP VISUALIZATION SUMMARY")
+        print(f"{'='*50}")
+        print(f"Total episodes processed: {stats['total_episodes']}")
+        print(f"Episodes with sweeps: {stats['episodes_with_sweeps']}")
+        print(f"Total sweeps detected: {stats['total_sweeps']}")
+        print(f"Output directory: {output_path}")
+        print(f"{'='*50}")
+
+    return stats
 
 
-if __name__ == "__main__":
+# ============================================================
+# 命令行入口
+# ============================================================
+
+def main():
+    """命令行入口"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Visualize sweep detection")
-    parser.add_argument("--input", "-i", type=str, required=True,
-                       help="Input dataset path")
-    parser.add_argument("--output", "-o", type=str, default="./sweep_viz",
-                       help="Output directory")
-    parser.add_argument("--max-episodes", type=int, default=5,
-                       help="Max episodes to visualize")
-    parser.add_argument("--energy-percentile", type=int, default=50)
-    parser.add_argument("--merge-gap", type=int, default=3)
-    parser.add_argument("--arm", type=str, default="left",
-                       choices=["left", "right", "both"],
-                       help="Which arm to analyze")
-    parser.add_argument("--video", action="store_true",
-                       help="Generate animated video instead of static images")
-    parser.add_argument("--video-fps", type=int, default=10,
-                       help="Video frame rate (default: 10)")
+    parser = argparse.ArgumentParser(
+        description="Visualize sweep detection for LeRobot dataset"
+    )
+    parser.add_argument(
+        "dataset_path",
+        type=str,
+        help="Path to LeRobot dataset"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=str,
+        default="./sweep_viz",
+        help="Output directory (default: ./sweep_viz)"
+    )
+    parser.add_argument(
+        "-n", "--max-episodes",
+        type=int,
+        default=10,
+        help="Maximum number of episodes to visualize (default: 10)"
+    )
+    parser.add_argument(
+        "-e", "--episodes",
+        type=int,
+        nargs="+",
+        help="Specific episode IDs to visualize"
+    )
+    parser.add_argument(
+        "-t", "--threshold",
+        type=float,
+        default=0.05,
+        help="Sweep threshold in meters (default: 0.05 = 5cm)"
+    )
+    parser.add_argument(
+        "-v", "--video",
+        action="store_true",
+        help="Generate animation videos"
+    )
+    parser.add_argument(
+        "--arm",
+        type=str,
+        choices=["left", "right", "both"],
+        default="left",
+        help="Which arm to analyze (default: left)"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress verbose output"
+    )
 
     args = parser.parse_args()
 
+    # 创建配置
     config = SweepSegmentConfig(
-        verbose=False,
-        energy_percentile=args.energy_percentile,
-        merge_gap=args.merge_gap,
-        active_arm=args.arm
+        active_arm=args.arm,
+        verbose=not args.quiet,
     )
 
-    if args.video:
-        visualize_dataset_video(
-            dataset_path=args.input,
-            output_dir=args.output,
-            max_episodes=args.max_episodes,
-            config=config,
-            video_fps=args.video_fps
-        )
-    else:
-        visualize_dataset(
-            dataset_path=args.input,
-            output_dir=args.output,
-            max_episodes=args.max_episodes,
-            config=config
-        )
+    # 运行可视化
+    visualize_dataset_sweeps(
+        dataset_path=args.dataset_path,
+        output_dir=args.output,
+        config=config,
+        episode_ids=args.episodes,
+        max_episodes=args.max_episodes,
+        sweep_threshold=args.threshold,
+        generate_videos=args.video,
+    )
+
+
+if __name__ == "__main__":
+    main()
