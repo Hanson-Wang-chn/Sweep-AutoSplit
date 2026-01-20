@@ -22,6 +22,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
+from tqdm import tqdm
 
 try:
     import cv2
@@ -777,33 +778,39 @@ class LeRobotSegmentExporter:
         episode_data_list = []
         total_frames = 0
 
-        for i, export_info in enumerate(export_infos):
-            # 加载源数据
-            source_data = data_loader.load_episode(export_info.source_episode_id)
-            source_df = data_loader.load_episode_raw(export_info.source_episode_id)
+        # 使用 tqdm 显示导出进度
+        with tqdm(total=len(export_infos), desc="Exporting segments", unit="video") as pbar:
+            for i, export_info in enumerate(export_infos):
+                # 加载源数据
+                source_data = data_loader.load_episode(export_info.source_episode_id)
+                source_df = data_loader.load_episode_raw(export_info.source_episode_id)
 
-            # 导出 segment
-            episode_meta = self.export_segment(
-                source_df=source_df,
-                segment_info=export_info,
-                source_video_paths=source_data.video_paths or {},
-            )
-            episode_metadata_list.append(episode_meta)
-            total_frames += episode_meta["length"]
+                # 导出 segment
+                episode_meta = self.export_segment(
+                    source_df=source_df,
+                    segment_info=export_info,
+                    source_video_paths=source_data.video_paths or {},
+                )
+                episode_metadata_list.append(episode_meta)
+                total_frames += episode_meta["length"]
 
-            # 加载导出的数据用于统计
-            chunk_idx = export_info.new_episode_id // self.config.chunks_size
-            parquet_path = (
-                self.output_path / "data" / f"chunk-{chunk_idx:03d}" /
-                f"episode_{export_info.new_episode_id:06d}.parquet"
-            )
-            episode_data_list.append(pd.read_parquet(parquet_path))
+                # 加载导出的数据用于统计
+                chunk_idx = export_info.new_episode_id // self.config.chunks_size
+                parquet_path = (
+                    self.output_path / "data" / f"chunk-{chunk_idx:03d}" /
+                    f"episode_{export_info.new_episode_id:06d}.parquet"
+                )
+                episode_data_list.append(pd.read_parquet(parquet_path))
 
-            if progress_callback:
-                progress_callback(i + 1, len(export_infos))
+                # 更新进度条，显示已完成和剩余的数量
+                pbar.set_postfix({
+                    'completed': i + 1,
+                    'remaining': len(export_infos) - i - 1
+                })
+                pbar.update(1)
 
-            if self.config.verbose and (i + 1) % 10 == 0:
-                print(f"Exported {i + 1}/{len(export_infos)} segments")
+                if progress_callback:
+                    progress_callback(i + 1, len(export_infos))
 
         # Phase 4: 计算统计信息
         if self.config.verbose:
