@@ -38,6 +38,9 @@ from .mask_generator import (
     ROIConfig,
     load_roi_config,
     get_roi_config,
+    convert_video_to_h264,
+    check_video_codec,
+    _CONVERTED_VIDEO_CACHE,
 )
 
 
@@ -55,6 +58,41 @@ def check_ffmpeg_available() -> bool:
 
 
 FFMPEG_AVAILABLE = check_ffmpeg_available()
+
+
+def _get_readable_video_path(video_path: str, verbose: bool = False) -> str:
+    """
+    获取可读的视频路径，如果需要则转换为 H.264
+
+    如果源视频是 AV1 等 OpenCV 无法解码的格式，自动转换为 H.264
+
+    Args:
+        video_path: 源视频路径
+        verbose: 是否打印详细信息
+
+    Returns:
+        可读的视频路径（可能是原路径或转换后的 H.264 路径）
+    """
+    # 检查是否已有缓存的转换视频
+    if video_path in _CONVERTED_VIDEO_CACHE:
+        cached_path = _CONVERTED_VIDEO_CACHE[video_path]
+        if os.path.exists(cached_path):
+            if verbose:
+                print(f"[_get_readable_video_path] Using cached H.264: {cached_path}")
+            return cached_path
+
+    # 检查视频编解码器
+    codec = check_video_codec(video_path)
+    if codec and codec.lower() not in ['h264', 'avc', 'avc1']:
+        if verbose:
+            print(f"[_get_readable_video_path] Source codec: {codec}, converting to H.264...")
+        h264_path = convert_video_to_h264(video_path)
+        if h264_path:
+            if verbose:
+                print(f"[_get_readable_video_path] Converted to: {h264_path}")
+            return h264_path
+
+    return video_path
 
 
 @dataclass
@@ -374,12 +412,15 @@ class LeRobotSegmentExporter:
         """
         使用 OpenCV 导出视频片段 (备选方案)
 
-        注意: OpenCV 可能无法正确处理某些编码格式（如 AV1）
+        注意: 如果源视频是 AV1 等格式，会先转换为 H.264
         """
         if not CV2_AVAILABLE:
             return False
 
-        cap = cv2.VideoCapture(source_video_path)
+        # 如果源视频是 AV1 等格式，转换为 H.264 以便 OpenCV 读取
+        readable_video_path = _get_readable_video_path(source_video_path, verbose=self.config.verbose)
+
+        cap = cv2.VideoCapture(readable_video_path)
         if not cap.isOpened():
             return False
 
@@ -538,6 +579,7 @@ class LeRobotSegmentExporter:
         创建 mask 叠加视频
 
         将 sweep mask 以半透明方式叠加在源视频上
+        优先使用 FFmpeg 进行视频编码（更可靠）
 
         Args:
             mask: 二值 mask (H, W), dtype=uint8
@@ -553,10 +595,13 @@ class LeRobotSegmentExporter:
         if not CV2_AVAILABLE:
             return False
 
+        # 如果源视频是 AV1 等格式，转换为 H.264 以便 OpenCV 读取
+        readable_video_path = _get_readable_video_path(source_video_path, verbose=self.config.verbose)
+
         # 打开源视频
-        cap = cv2.VideoCapture(source_video_path)
+        cap = cv2.VideoCapture(readable_video_path)
         if not cap.isOpened():
-            print(f"Warning: Cannot open source video for overlay: {source_video_path}")
+            print(f"Warning: Cannot open source video for overlay: {readable_video_path}")
             return False
 
         # 获取视频属性
@@ -579,25 +624,96 @@ class LeRobotSegmentExporter:
         mask_color = np.zeros((height, width, 3), dtype=np.uint8)
         mask_color[mask > 0] = mask_color_bgr
 
-        # 创建输出视频
+        # 定位到起始帧
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        # 方法1: 使用 FFmpeg 管道写入（更可靠）
+        if FFMPEG_AVAILABLE:
+            try:
+                # 启动 FFmpeg 进程，通过管道接收原始帧数据
+                cmd = [
+                    'ffmpeg',
+                    '-hide_banner',
+                    '-loglevel', 'error',
+                    '-nostdin',
+                    '-y',
+                    '-f', 'rawvideo',
+                    '-vcodec', 'rawvideo',
+                    '-s', f'{width}x{height}',
+                    '-pix_fmt', 'bgr24',
+                    '-r', str(fps),
+                    '-i', '-',  # 从 stdin 读取
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '18',
+                    '-pix_fmt', 'yuv420p',
+                    output_video_path
+                ]
+
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+
+                # 处理每一帧并写入管道
+                for _ in range(num_frames):
+                    ret, frame = cap.read()
+                    if not ret:
+                        frame = np.zeros((height, width, 3), dtype=np.uint8)
+
+                    # 创建叠加图像
+                    overlay = frame.copy()
+                    overlay[mask > 0] = mask_color[mask > 0]
+
+                    # 混合原始帧和叠加层
+                    blended = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
+
+                    # 写入管道
+                    process.stdin.write(blended.tobytes())
+
+                # 关闭管道并等待完成
+                process.stdin.close()
+                process.wait(timeout=120)
+
+                cap.release()
+
+                if process.returncode == 0:
+                    return True
+                else:
+                    stderr = process.stderr.read().decode('utf-8', errors='ignore')
+                    if self.config.verbose:
+                        print(f"FFmpeg pipe encoding failed: {stderr[:200]}")
+                    # 继续尝试 OpenCV 方法
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"FFmpeg pipe encoding failed: {e}")
+                cap.release()
+                # 重新打开视频尝试 OpenCV 方法
+                cap = cv2.VideoCapture(readable_video_path)
+                if not cap.isOpened():
+                    return False
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        # 方法2: 使用 OpenCV VideoWriter（备选）
+        out = None
         for codec in ['avc1', 'mp4v', 'XVID']:
             fourcc = cv2.VideoWriter_fourcc(*codec)
             out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
             if out.isOpened():
                 break
-        else:
+            out = None
+
+        if out is None:
             cap.release()
             print(f"Warning: Cannot create video writer for overlay: {output_video_path}")
             return False
-
-        # 定位到起始帧
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
         # 处理每一帧
         for _ in range(num_frames):
             ret, frame = cap.read()
             if not ret:
-                # 如果读取失败，使用最后一帧或黑帧
                 frame = np.zeros((height, width, 3), dtype=np.uint8)
 
             # 创建叠加图像
@@ -606,10 +722,6 @@ class LeRobotSegmentExporter:
 
             # 混合原始帧和叠加层
             blended = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
-
-            # 添加标签
-            # cv2.putText(blended, "Sweep Mask", (10, 30),
-            #            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
             out.write(blended)
 
@@ -739,7 +851,6 @@ class LeRobotSegmentExporter:
         self,
         data_loader,  # LeRobotDataLoader
         all_boundaries: Dict[int, List[SegmentBoundary]],
-        task_prefix: str = "sweep",
         progress_callback: Optional[callable] = None
     ) -> Dict[str, Any]:
         """
@@ -748,7 +859,6 @@ class LeRobotSegmentExporter:
         Args:
             data_loader: 数据加载器
             all_boundaries: {episode_idx: [boundaries]} 的字典
-            task_prefix: 任务前缀
             progress_callback: 进度回调函数
 
         Returns:
@@ -756,18 +866,12 @@ class LeRobotSegmentExporter:
         """
         self.create_directory_structure(data_loader)
 
-        # Phase 1: 收集所有 task 并创建映射
-        all_tasks = set()
-        for ep_idx, boundaries in all_boundaries.items():
-            for boundary in boundaries:
-                if boundary.is_valid:
-                    task_str = f"{task_prefix}_segment_{boundary.sweep_idx}"
-                    all_tasks.add(task_str)
-
-        task_to_index = {task: idx for idx, task in enumerate(sorted(all_tasks))}
+        # 固定的 task 名称
+        fixed_task_name = "<skill>sweep<skill> Sweep away the red beads that are inside the green masked region and do not disturb beads outside the masked area."
+        task_to_index = {fixed_task_name: 0}
 
         if self.config.verbose:
-            print(f"Found {len(all_tasks)} unique tasks")
+            print(f"Using fixed task name: {fixed_task_name}")
 
         # Phase 2: 准备导出信息
         export_infos = []
@@ -778,13 +882,12 @@ class LeRobotSegmentExporter:
                 if not boundary.is_valid:
                     continue
 
-                task_str = f"{task_prefix}_segment_{boundary.sweep_idx}"
                 export_info = SegmentExportInfo(
                     source_episode_id=ep_idx,
                     new_episode_id=new_episode_id,
                     boundary=boundary,
-                    task_string=task_str,
-                    task_index=task_to_index[task_str]
+                    task_string=fixed_task_name,
+                    task_index=0
                 )
                 export_infos.append(export_info)
                 new_episode_id += 1
@@ -1057,7 +1160,6 @@ def export_segmented_dataset(
     output_path: str,
     all_boundaries: Dict[int, List[SegmentBoundary]],
     config: Optional[SweepSegmentConfig] = None,
-    task_prefix: str = "sweep",
     export_mask: bool = True,
     roi_config_path: Optional[str] = None,
     export_workers: int = 1,
@@ -1070,7 +1172,6 @@ def export_segmented_dataset(
         output_path: 输出路径
         all_boundaries: 所有 episode 的边界
         config: 切分配置（可选）
-        task_prefix: 任务前缀
         export_mask: 是否导出 sweep mask
         roi_config_path: ROI 配置文件路径（用于 mask 过滤）
         export_workers: 视频导出并行进程数
@@ -1100,7 +1201,6 @@ def export_segmented_dataset(
     stats = exporter.export_all_segments(
         data_loader=data_loader,
         all_boundaries=all_boundaries,
-        task_prefix=task_prefix
     )
 
     return stats

@@ -134,7 +134,7 @@ def plot_sweep_detection_for_episode(
     ax2.plot(time_axis, v_xy_smooth * 100, 'g-', linewidth=2, label='Smoothed v_xy')
 
     # 计算阈值
-    v_xy_percentile = config.energy_percentile
+    v_xy_percentile = 60  # 默认使用 60 百分位数
     v_xy_threshold = np.percentile(v_xy_smooth, v_xy_percentile)
     v_xy_mean = np.mean(v_xy_smooth)
     v_xy_std = np.std(v_xy_smooth)
@@ -255,7 +255,7 @@ def generate_sweep_detection_video(
     time_axis = np.arange(N) / fps
 
     # 计算 v_xy 阈值
-    v_xy_percentile = config.energy_percentile
+    v_xy_percentile = 60  # 默认使用 60 百分位数
     v_xy_threshold = np.percentile(v_xy_smooth, v_xy_percentile)
     v_xy_mean = np.mean(v_xy_smooth)
     v_xy_std = np.std(v_xy_smooth)
@@ -420,8 +420,6 @@ def visualize_dataset(
     if config is None:
         config = SweepSegmentConfig(
             verbose=False,
-            energy_percentile=50,
-            merge_gap=3,
             active_arm="left"  # 必须指定手臂
         )
 
@@ -478,8 +476,6 @@ def visualize_dataset_video(
     if config is None:
         config = SweepSegmentConfig(
             verbose=False,
-            energy_percentile=50,
-            merge_gap=3,
             active_arm="left"
         )
 
@@ -527,8 +523,6 @@ if __name__ == "__main__":
                        help="Output directory")
     parser.add_argument("--max-episodes", type=int, default=5,
                        help="Max episodes to visualize")
-    parser.add_argument("--energy-percentile", type=int, default=50)
-    parser.add_argument("--merge-gap", type=int, default=3)
     parser.add_argument("--arm", type=str, default="left",
                        choices=["left", "right", "both"],
                        help="Which arm to analyze")
@@ -541,8 +535,6 @@ if __name__ == "__main__":
 
     config = SweepSegmentConfig(
         verbose=False,
-        energy_percentile=args.energy_percentile,
-        merge_gap=args.merge_gap,
         active_arm=args.arm
     )
 

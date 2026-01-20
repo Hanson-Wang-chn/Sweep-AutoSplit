@@ -298,7 +298,7 @@ class SweepDetector:
             print(f"[SweepDetector] 检测到 {len(low_regions)} 个低位区间")
 
         # Step 5: 计算 v_xy 阈值用于验证
-        v_xy_percentile = config.energy_percentile
+        v_xy_percentile = 60  # 默认使用 60 百分位数
         v_xy_threshold = np.percentile(v_xy_smooth, v_xy_percentile)
         v_xy_mean = np.mean(v_xy_smooth)
         v_xy_std = np.std(v_xy_smooth)
@@ -319,6 +319,7 @@ class SweepDetector:
             v_xy_in_region = v_xy_smooth[P_t0:P_t1+1]
             v_z_in_region = v_z_smooth[P_t0:P_t1+1]
             d_in_region = d_smooth[P_t0:P_t1+1]
+
 
             # 验证1：长度在合理范围（放宽限制）
             min_length = 3  # 最少 3 帧
