@@ -877,7 +877,7 @@ class LeRobotSegmentExporter:
         self.create_directory_structure(data_loader)
 
         # 固定的 task 名称
-        fixed_task_name = "<skill>sweep<skill> Sweep away the red beads that are inside the green masked region and do not disturb beads outside the masked area."
+        fixed_task_name = "<skill>sweep<skill> Sweep away the red beads under the green mask out of the black bounding box."
         task_to_index = {fixed_task_name: 0}
 
         if self.config.verbose:

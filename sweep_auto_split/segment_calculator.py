@@ -8,14 +8,16 @@ Segment 边界计算模块
 2. s >= P_t1 - H + 1 + R_min  (窗口右侧有足够 Retreat)
 3. s >= P_{t-1,1} + 1         (不混入上一个 sweep)
 4. s <= P_{t+1,0} - H         (不混入下一个 sweep)
+5. s >= 0                      (不超出 episode 左边界)
+6. s <= episode_length - H     (不超出 episode 右边界)
 
 合格区间：
-    s_min = max(P_{t-1,1}+1, P_t1-H+1+R_min)
-    s_max = min(P_t0-A_min, P_{t+1,0}-H)
+    s_min = max(constraint_2, constraint_3, 0)
+    s_max = min(constraint_1, constraint_4, episode_length - H)
 
 Segment 边界：
     T_t0 = s_min
-    T_t1 = s_max + H - 1  (使用 s_min 作为起点)
+    T_t1 = s_max + H - 1
 
     注意：多样性 diversity = s_max - s_min + 1 表示训练时可用的起点数量
 """
@@ -97,7 +99,10 @@ class SegmentCalculator:
             # 约束 2: s >= P_t1 - H + 1 + R_min（窗口右侧有足够 Retreat）
             constraint_2 = P_t1 - H + 1 + R_min
 
-            s_min = max(constraint_3, constraint_2)
+            # 约束 5: s >= 0（episode 左边界）
+            episode_bound_lower = 0
+
+            s_min = max(constraint_3, constraint_2, episode_bound_lower)
 
             # ============================================================
             # 计算 s_max（上界）
@@ -108,7 +113,10 @@ class SegmentCalculator:
             # 约束 4: s <= P_{t+1,0} - H（不混入下一个 sweep）
             constraint_4 = P_next_0 - H
 
-            s_max = min(constraint_1, constraint_4)
+            # 约束 6: s <= episode_length - H（episode 右边界）
+            episode_bound_upper = episode_length - H
+
+            s_max = min(constraint_1, constraint_4, episode_bound_upper)
 
             # ============================================================
             # 检查有效性
@@ -141,9 +149,9 @@ class SegmentCalculator:
             if config.verbose:
                 status = "✓" if is_valid else "✗"
                 print(f"  [{status}] Sweep {kp.sweep_idx}:")
-                print(f"      P_t0={P_t0}, P_t1={P_t1}")
-                print(f"      s_min={s_min} (constraint_3={constraint_3}, constraint_2={constraint_2})")
-                print(f"      s_max={s_max} (constraint_1={constraint_1}, constraint_4={constraint_4})")
+                print(f"      P_t0={P_t0}, P_t1={P_t1}, episode_length={episode_length}")
+                print(f"      s_min={s_min} (c2={constraint_2}, c3={constraint_3}, ep_lower={episode_bound_lower})")
+                print(f"      s_max={s_max} (c1={constraint_1}, c4={constraint_4}, ep_upper={episode_bound_upper})")
                 print(f"      T=[{T_t0}, {T_t1}], diversity={diversity}")
 
         return boundaries
